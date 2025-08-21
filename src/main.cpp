@@ -108,7 +108,7 @@ void PollCANStatus() {
 
 void setup() {
   // setup serial output
-  Serial.begin(115200);
+  Serial.begin(230400);
   delay(100);
 
   // toggle the LED pin at rate of 1 Hz
