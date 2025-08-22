@@ -1,6 +1,9 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h> 
+#include "wifi_config.h"  
 
-#define CAN_RX_PIN GPIO_NUM_34
+#define CAN_RX_PIN GPIO_NUM_34  
 #define CAN_TX_PIN GPIO_NUM_32
 #define SDA_PIN 16
 #define SCL_PIN 17
@@ -44,6 +47,13 @@ elapsedMillis time_since_last_can_rx = 0;
 // Time after which we should reboot if we haven't received any CAN messages
 #define MAX_RX_WAIT_TIME_MS 30000
 
+String can_state;
+String wifi_status;
+String wifi_ip;
+
+WebServer server(80); // Web server instance
+String display_content; // Holds current display info
+
 void ToggleLed() {
   static bool led_state = false;
   digitalWrite(LED_BUILTIN, led_state);
@@ -63,8 +73,6 @@ void HandleStreamActisenseMsg(const tN2kMsg &message) {
   ToggleLed();
   nmea2000->SendMsg(message);
 }
-
-String can_state;
 
 void RecoverFromCANBusOff() {
   // This recovery routine first discussed in
@@ -104,6 +112,48 @@ void PollCANStatus() {
       RecoverFromCANBusOff();
       break;
   }
+}
+
+void ReconnectWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    wifi_status = "Reconnecting";
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+    int wifi_attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && wifi_attempts < 20) {
+      delay(250);
+      wifi_attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      wifi_status = "Connected";
+      wifi_ip = WiFi.localIP().toString();
+      Serial.print("WiFi reconnected, IP: ");
+      Serial.println(wifi_ip);
+    } else {
+      wifi_status = "Failed";
+      wifi_ip = "-";
+      Serial.println("WiFi reconnection failed");
+    }
+  }
+}
+
+void UpdateDisplayContent() {
+  display_content = "SH-ESP32 N2K USB GW\n";
+  display_content += "CAN: " + can_state + "\n";
+  display_content += "WiFi: " + wifi_status + "\n";
+  display_content += "IP: " + wifi_ip + "\n";
+  display_content += "Uptime: " + String(millis() / 1000) + "\n";
+  display_content += "RX: " + String(num_n2k_messages) + "\n";
+  display_content += "TX: " + String(num_actisense_messages) + "\n";
+}
+
+void handleRoot() {
+  String html = "<html><head><title>SH-ESP32 N2K USB GW</title>";
+  html += "<meta http-equiv='refresh' content='5'>"; // Refresh every 5 seconds
+  html += "</head><body><pre>";
+  html += display_content;
+  html += "</pre></body></html>";
+  server.send(200, "text/html", html);
 }
 
 void setup() {
@@ -157,6 +207,29 @@ void setup() {
   actisense_reader.SetDefaultSource(75);
   actisense_reader.SetMsgHandler(HandleStreamActisenseMsg);
 
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  wifi_status = "Connecting";
+  int wifi_attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && wifi_attempts < 20) {
+    delay(500);
+    wifi_attempts++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    wifi_status = "Connected";
+    wifi_ip = WiFi.localIP().toString();
+    Serial.print("WiFi connected, IP: ");
+    Serial.println(wifi_ip);
+  } else {
+    wifi_status = "Failed";
+    wifi_ip = "-";
+    Serial.println("WiFi connection failed");
+  }
+
+  // Start web server
+  server.on("/", handleRoot);
+  server.begin();
+
   // No need to parse the messages at every single loop iteration; 1 ms will do
   app.onRepeat(1, []() {
     PollCANStatus();
@@ -174,6 +247,11 @@ void setup() {
       }
     }
   });
+
+  app.onRepeat(60000, []() {  // Check WiFi connection every 30 seconds
+    ReconnectWiFi(); // Add this call to periodically check and reconnect WiFi
+  });
+
 
   // initialize the display
   i2c = new TwoWire(0);
@@ -196,15 +274,23 @@ void setup() {
     display->setTextColor(SSD1306_WHITE);
     display->printf("SH-ESP32 N2K USB GW\n");
     display->printf("CAN: %s\n", can_state.c_str());
+    display->printf("WiFi: %s\n", wifi_status.c_str());
+    display->printf("IP: %s\n", wifi_ip.c_str());
     display->printf("Uptime: %lu\n", millis() / 1000);
     display->printf("RX: %d\n", num_n2k_messages);
     display->printf("TX: %d\n", num_actisense_messages);
 
     display->display();
 
+    UpdateDisplayContent(); // Update web content
+
     num_n2k_messages = 0;
     num_actisense_messages = 0;
   });
 }
 
-void loop() { app.tick(); }
+void loop() {
+  app.tick();
+  server.handleClient(); // Handle web requests
+}
+
